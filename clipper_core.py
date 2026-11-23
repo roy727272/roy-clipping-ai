@@ -131,7 +131,8 @@ def fetch_youtube_metadata(url: str) -> Dict[str, Any]:
         'ffmpeg_location': FFMPEG_PATH,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb'],
+                'player_client': ['tv_embedded', 'tv', 'mweb', 'android', 'ios'],
+                'player_skip': ['webpage', 'configs', 'js']
             }
         }
     }
@@ -220,7 +221,8 @@ def fetch_transcript(video_id: str, video_url: str, caption_lang: str = "en") ->
         'ffmpeg_location': FFMPEG_PATH,
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb'],
+                'player_client': ['tv_embedded', 'tv', 'mweb', 'android', 'ios'],
+                'player_skip': ['webpage', 'configs', 'js']
             }
         }
     }
@@ -590,25 +592,96 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(header + "\n".join(events))
 
+def download_from_invidious_fallback(video_id: str, output_path: str) -> bool:
+    """Download video stream from public Invidious instances when YouTube blocks datacenter IP"""
+    instances = [
+        "https://iv.ggtyler.dev",
+        "https://invidious.privacydev.net",
+        "https://invidious.drgns.space",
+        "https://inv.vern.cc",
+        "https://invidious.jing.rocks",
+        "https://invidious.nerdvpn.de"
+    ]
+    import requests
+    for inst in instances:
+        try:
+            api_url = f"{inst}/api/v1/videos/{video_id}"
+            r = requests.get(api_url, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                streams = data.get("formatStreams", [])
+                if streams:
+                    stream_url = streams[-1].get("url")
+                    if stream_url:
+                        with requests.get(stream_url, stream=True, timeout=30) as resp:
+                            if resp.status_code == 200:
+                                with open(output_path, "wb") as f:
+                                    for chunk in resp.iter_content(chunk_size=32768):
+                                        if chunk:
+                                            f.write(chunk)
+                                if os.path.exists(output_path) and os.path.getsize(output_path) > 100000:
+                                    print(f"Downloaded via Invidious ({inst})")
+                                    return True
+        except Exception:
+            continue
+    return False
+
+def download_from_piped_fallback(video_id: str, output_path: str) -> bool:
+    """Download video stream from public Piped instances"""
+    piped_instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://api.piped.privacydev.net",
+        "https://piped-api.lunar.icu"
+    ]
+    import requests
+    for inst in piped_instances:
+        try:
+            api_url = f"{inst}/streams/{video_id}"
+            r = requests.get(api_url, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                video_streams = data.get("videoStreams", [])
+                for s in video_streams:
+                    if s.get("format") == "MPEG_4" or "video/mp4" in s.get("mimeType", ""):
+                        s_url = s.get("url")
+                        if s_url:
+                            with requests.get(s_url, stream=True, timeout=30) as resp:
+                                if resp.status_code == 200:
+                                    with open(output_path, "wb") as f:
+                                        for chunk in resp.iter_content(chunk_size=32768):
+                                            if chunk:
+                                                f.write(chunk)
+                                    if os.path.exists(output_path) and os.path.getsize(output_path) > 100000:
+                                        print(f"Downloaded via Piped ({inst})")
+                                        return True
+        except Exception:
+            continue
+    return False
+
 def download_video_segment(video_url: str, output_path: str, max_height: int = 1080) -> str:
     """
     Download video stream with yt-dlp.
-    Uses flexible format selectors without restrictive [ext=mp4] requirements
-    (FFmpeg handles merging and converting to MP4 automatically) and tries
-    multiple player clients (android, ios, mweb) to avoid cloud IP blocks.
+    Uses TV/Embedded/Mobile client selectors to bypass YouTube's cloud datacenter bot wall,
+    and falls back to Invidious & Piped proxy streams if YouTube blocks all direct clients.
     """
+    vid_id = extract_video_id(video_url) or "video"
+
     formats_to_try = [
         f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/bestvideo+bestaudio/best",
-        "bestvideo+bestaudio/best",
         "best",
         "worst"
     ]
     
+    # TV and embedded clients do not require Web Botguard or JS challenge
     client_combos = [
+        ['tv_embedded'],
+        ['tv_samsung'],
+        ['tv'],
+        ['mweb'],
+        ['web_embedded'],
         ['android', 'ios'],
         ['ios'],
-        ['mweb'],
-        ['web_creator', 'web']
+        ['android']
     ]
     
     last_err = None
@@ -625,18 +698,31 @@ def download_video_segment(video_url: str, output_path: str, max_height: int = 1
                     'extractor_args': {
                         'youtube': {
                             'player_client': clients,
+                            'player_skip': ['webpage', 'configs', 'js']
                         }
                     }
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ydl.download([video_url])
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
                     return output_path
             except Exception as e:
                 last_err = e
                 continue
 
-    # Final attempt with standard best
+    # Fallback 1: Try Invidious API
+    if vid_id:
+        print("yt-dlp blocked on datacenter IP. Trying Invidious proxy...")
+        if download_from_invidious_fallback(vid_id, output_path):
+            return output_path
+
+    # Fallback 2: Try Piped API
+    if vid_id:
+        print("Trying Piped proxy...")
+        if download_from_piped_fallback(vid_id, output_path):
+            return output_path
+
+    # Final attempt with generic best
     try:
         ydl_opts_final = {
             'format': 'best',
@@ -648,12 +734,15 @@ def download_video_segment(video_url: str, output_path: str, max_height: int = 1
         }
         with yt_dlp.YoutubeDL(ydl_opts_final) as ydl:
             ydl.download([video_url])
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
             return output_path
     except Exception as e:
         last_err = e
 
-    raise RuntimeError(f"Could not download YouTube video: {last_err}")
+    raise RuntimeError(
+        f"YouTube blocked datacenter download ({last_err}). "
+        f"Please use the '📁 Upload Video from Phone / PC' tab above to upload this video file directly!"
+    )
 
 def detect_streamer_facecam_ai(
     source_video_path: str,
