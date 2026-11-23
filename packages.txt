@@ -1,3 +1,4 @@
 ffmpeg
 fonts-liberation
 fontconfig
+nodejs
