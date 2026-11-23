@@ -591,49 +591,69 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         f.write(header + "\n".join(events))
 
 def download_video_segment(video_url: str, output_path: str, max_height: int = 1080) -> str:
-    """Download video stream with yt-dlp using multiple player client fallbacks to bypass cloud blocks"""
+    """
+    Download video stream with yt-dlp.
+    Uses flexible format selectors without restrictive [ext=mp4] requirements
+    (FFmpeg handles merging and converting to MP4 automatically) and tries
+    multiple player clients (android, ios, mweb) to avoid cloud IP blocks.
+    """
+    formats_to_try = [
+        f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/bestvideo+bestaudio/best",
+        "bestvideo+bestaudio/best",
+        "best",
+        "worst"
+    ]
+    
     client_combos = [
         ['android', 'ios'],
         ['ios'],
         ['mweb'],
-        ['web_creator']
+        ['web_creator', 'web']
     ]
+    
     last_err = None
-    for clients in client_combos:
-        try:
-            ydl_opts = {
-                'format': f'bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': output_path,
-                'quiet': True,
-                'no_warnings': True,
-                'merge_output_format': 'mp4',
-                'ffmpeg_location': FFMPEG_PATH,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': clients,
+    for fmt in formats_to_try:
+        for clients in client_combos:
+            try:
+                ydl_opts = {
+                    'format': fmt,
+                    'outtmpl': output_path,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'merge_output_format': 'mp4',
+                    'ffmpeg_location': FFMPEG_PATH,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': clients,
+                        }
                     }
                 }
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return output_path
-        except Exception as e:
-            last_err = e
-            continue
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([video_url])
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                    return output_path
+            except Exception as e:
+                last_err = e
+                continue
 
-    # Fallback to standard yt-dlp
-    ydl_opts_fallback = {
-        'format': 'best',
-        'outtmpl': output_path,
-        'quiet': True,
-        'no_warnings': True,
-        'merge_output_format': 'mp4',
-        'ffmpeg_location': FFMPEG_PATH
-    }
-    with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
-        ydl.download([video_url])
-    return output_path
+    # Final attempt with standard best
+    try:
+        ydl_opts_final = {
+            'format': 'best',
+            'outtmpl': output_path,
+            'quiet': True,
+            'no_warnings': True,
+            'merge_output_format': 'mp4',
+            'ffmpeg_location': FFMPEG_PATH
+        }
+        with yt_dlp.YoutubeDL(ydl_opts_final) as ydl:
+            ydl.download([video_url])
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+            return output_path
+    except Exception as e:
+        last_err = e
+
+    raise RuntimeError(f"Could not download YouTube video: {last_err}")
 
 def detect_streamer_facecam_ai(
     source_video_path: str,
