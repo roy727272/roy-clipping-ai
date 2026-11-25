@@ -686,27 +686,74 @@ def download_clip_range(
         'best'
     ]
 
-    for fmt in formats:
-        try:
-            ydl_opts = {
-                'format': fmt,
-                'outtmpl': output_path,
-                'download_ranges': download_range_func(None, [(max(0.0, start_sec), end_sec)]),
-                'quiet': True,
-                'no_warnings': True,
-                'ffmpeg_location': FFMPEG_PATH
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
+    client_combos = [
+        ['android', 'ios'],
+        ['ios'],
+        ['android'],
+        ['mweb'],
+        ['tv_embedded'],
+        ['web_embedded'],
+        ['tv']
+    ]
 
+    last_exc = None
+    # Pass 1: Try fast range downloads with mobile/embedded clients
+    for clients in client_combos:
+        for fmt in formats:
+            try:
+                ydl_opts = {
+                    'format': fmt,
+                    'outtmpl': output_path,
+                    'download_ranges': download_range_func(None, [(max(0.0, start_sec), end_sec)]),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'ffmpeg_location': FFMPEG_PATH,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': clients,
+                            'player_skip': ['webpage', 'configs', 'js']
+                        }
+                    }
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([video_url])
+
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    print(f"[FAST RANGE] Successfully downloaded clip segment ({start_sec}s - {end_sec}s) with clients {clients}: {output_path}")
+                    return output_path
+            except Exception as e:
+                last_exc = e
+                continue
+
+    # Pass 2: Fallback to segment download with all fallback mechanisms (including Invidious/Piped) + FFmpeg slice
+    print(f"[FAST RANGE] Direct range download blocked ({last_exc}). Trying fallback download...")
+    try:
+        temp_full = str(out_p.parent / f"temp_slice_{int(time.time())}_{int(start_sec)}.mp4")
+        downloaded = download_video_segment(video_url, temp_full, max_height=max_height)
+        if downloaded and os.path.exists(downloaded) and os.path.getsize(downloaded) > 10000:
+            cmd = [
+                FFMPEG_PATH, "-y",
+                "-ss", str(max(0.0, start_sec)),
+                "-to", str(end_sec),
+                "-i", downloaded,
+                "-c", "copy",
+                output_path
+            ]
+            subprocess.run(cmd, check=True)
+            try:
+                os.remove(downloaded)
+            except Exception:
+                pass
             if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                print(f"[FAST RANGE] Successfully downloaded clip segment ({start_sec}s - {end_sec}s): {output_path}")
+                print(f"[FALLBACK SLICE] Successfully sliced clip ({start_sec}s - {end_sec}s): {output_path}")
                 return output_path
-        except Exception as e:
-            print(f"[FAST RANGE] Format {fmt} notice: {e}")
-            continue
+    except Exception as e:
+        print(f"Fallback slice failed: {e}")
 
-    raise RuntimeError(f"Failed to download video clip segment ({start_sec}s - {end_sec}s) for {video_url}")
+    raise RuntimeError(
+        f"YouTube BotGuard has blocked direct streaming for this video ({last_exc}). "
+        "Please switch to '📁 Upload Video from Phone / PC' tab — upload your file directly to clip without any YouTube restrictions!"
+    )
 
 def download_video_segment(video_url: str, output_path: str, max_height: int = 1080) -> str:
     """
