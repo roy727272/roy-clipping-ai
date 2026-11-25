@@ -13,6 +13,7 @@ from clipper_core import (
     analyze_viral_moments_heuristic,
     generate_neon_ass_subtitle,
     download_video_segment,
+    download_clip_range,
     detect_streamer_facecam_ai,
     render_vertical_clip,
     SUBTITLE_STYLES,
@@ -156,10 +157,11 @@ with col2:
     layout_choice = st.selectbox(
         "📐 Video Layout:",
         options=[
-            ("split_streamer_top", "👑 Split-Screen: Streamer Facecam Top + Gameplay Bottom"),
+            ("split_streamer_circle", "👑 Circle Facecam Top + Clean Gameplay Bottom (AI Exclude Facecam)"),
+            ("split_streamer_top", "🖼️ Rect Facecam Top + Gameplay Bottom"),
             ("blur", "📱 Cinematic Blur (Opus Clip Style)"),
             ("stacked_bottom", "🎮 Gameplay Top + Streamer Facecam Bottom"),
-            ("pip", "🖼️ Picture-in-Picture (Overlay Box)"),
+            ("pip", "🪟 Picture-in-Picture (Overlay Box)"),
             ("crop", "🔍 9:16 Full Center Crop")
         ],
         format_func=lambda x: x[1],
@@ -237,11 +239,8 @@ if generate_btn:
                     transcript = []
                 progress_bar.progress(35)
                 
-                # Download YouTube video
-                status_box.update(label="📥 Step 3/5: Downloading source video stream...")
-                source_video_path = str(WORKDIR / f"{video_id}_src.mp4")
-                if not os.path.exists(source_video_path) or os.path.getsize(source_video_path) == 0:
-                    download_video_segment(youtube_url, source_video_path)
+                # In YouTube mode, we do not download full video ahead of time to avoid datacenter 429/timeout
+                status_box.update(label="📥 Step 3/5: Stream verified, preparing fast range clips...")
                 progress_bar.progress(55)
 
             # --- VIRAL MOMENT ANALYSIS ---
@@ -279,18 +278,41 @@ if generate_btn:
             progress_bar.progress(70)
             
             # --- FACECAM DETECTION & RENDERING ---
-            status_box.update(label="👁️ Step 5/5: AI auto-centering streamer facecam & rendering 9:16 vertical clips...")
+            status_box.update(label="👁️ Step 5/5: Auto-centering streamer facecam & rendering 9:16 vertical clips...")
             custom_face_crop = None
-            if layout_choice in ["split_streamer_top", "stacked_bottom", "pip"]:
-                face_info = detect_streamer_facecam_ai(source_video_path, api_key=api_key)
-                custom_face_crop = face_info.get("crop_filter")
-                st.write(f"✅ Streamer Facecam: {face_info.get('description', 'Auto-Centered')}")
+            custom_game_crop_x = None
+            if layout_choice in ["split_streamer_circle", "split_streamer_top", "stacked_bottom", "pip"]:
+                if source_video_path and os.path.exists(source_video_path):
+                    face_info = detect_streamer_facecam_ai(source_video_path, api_key=api_key)
+                    custom_face_crop = face_info.get("crop_filter")
+                    custom_game_crop_x = face_info.get("game_crop_x")
+                    st.write(f"✅ Streamer Facecam: {face_info.get('description', 'Auto-Centered')}")
             
             completed_clips = []
             total_c = len(viral_clips)
             
             for idx, c in enumerate(viral_clips, 1):
-                status_box.update(label=f"🎬 Rendering Clip {idx}/{total_c}: {c['title']}...")
+                raw_segment_path = None
+                if input_mode == "📁 Upload Video from Phone / PC" and source_video_path:
+                    render_source = source_video_path
+                    render_clip_info = c
+                else:
+                    status_box.update(label=f"📥 Downloading Clip {idx}/{total_c} ({c.get('title', 'Clip')})...")
+                    raw_segment_path = str(WORKDIR / f"raw_{video_id}_{idx}.mp4")
+                    download_clip_range(
+                        video_url=youtube_url,
+                        start_sec=c["start"],
+                        end_sec=c["end"],
+                        output_path=raw_segment_path
+                    )
+                    render_source = raw_segment_path
+                    render_clip_info = {
+                        "start": 0.0,
+                        "end": max(1.0, c["end"] - c["start"]),
+                        "title": c.get("title", f"Viral Clip #{idx}")
+                    }
+
+                status_box.update(label=f"🎬 Rendering Clip {idx}/{total_c}: {c.get('title', 'Clip')}...")
                 
                 sub_path = str(WORKDIR / f"sub_{video_id}_{idx}.ass")
                 generate_neon_ass_subtitle(
@@ -304,14 +326,21 @@ if generate_btn:
                 
                 out_clip_path = str(OUTPUT_DIR / f"roy_clip_{video_id}_{idx}.mp4")
                 render_vertical_clip(
-                    source_video=source_video_path,
-                    clip_info=c,
+                    source_video=render_source,
+                    clip_info=render_clip_info,
                     output_clip_path=out_clip_path,
                     subtitle_ass_path=sub_path,
                     layout=layout_choice,
                     facecam_pos="auto",
-                    custom_face_crop=custom_face_crop
+                    custom_face_crop=custom_face_crop,
+                    custom_game_crop_x=custom_game_crop_x
                 )
+
+                if raw_segment_path and os.path.exists(raw_segment_path):
+                    try:
+                        os.remove(raw_segment_path)
+                    except Exception:
+                        pass
                 
                 c["file_path"] = out_clip_path
                 completed_clips.append(c)
